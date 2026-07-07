@@ -383,6 +383,38 @@ fn start_direction(design: &Design) -> Vec<f64> {
     d
 }
 
+/// Design columns that are not estimable because the design is rank-deficient
+/// (limma nonEstimable). Left-to-right Gram-Schmidt keeps a column only if its
+/// residual against already-kept columns clears R's qr tol=1e-7; a column
+/// dependent on earlier ones is flagged, so the later of two collinear columns
+/// is the one reported — matching R's `qr()` pivoting for exact dependence.
+fn non_estimable(design: &Design) -> Vec<String> {
+    let p = design.n_coef;
+    let n = design.n_samples;
+    let mut basis: Vec<Vec<f64>> = Vec::new();
+    let mut ne = Vec::new();
+    for k in 0..p {
+        let mut col: Vec<f64> = (0..n).map(|s| design.data[s * p + k]).collect();
+        let orig = col.iter().map(|x| x * x).sum::<f64>().sqrt();
+        for b in &basis {
+            let d: f64 = col.iter().zip(b).map(|(a, c)| a * c).sum();
+            for (ci, bi) in col.iter_mut().zip(b) {
+                *ci -= d * bi;
+            }
+        }
+        let resid = col.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if resid <= 1e-7 * orig {
+            ne.push(design.coef_names[k].clone());
+        } else {
+            for x in &mut col {
+                *x /= resid;
+            }
+            basis.push(col);
+        }
+    }
+    ne
+}
+
 /// Solve A x = b (A row-major p×p), Gaussian elimination with partial pivoting.
 /// `a` and `rhs` are clobbered. Returns false if singular.
 fn solve(a: &mut [f64], rhs: &mut [f64], x: &mut [f64], p: usize) -> bool {
@@ -640,6 +672,19 @@ pub fn glm_lrt(args: &GlmLrtArgs, output: &mut dyn Write) -> Result<u64> {
             design.n_samples, m.n_samples
         )));
     }
+    if design.n_coef < 2 {
+        return Err(RsomicsError::InvalidInput(
+            "Need at least two columns for design, usually the first is the intercept column"
+                .into(),
+        ));
+    }
+    let not_estimable = non_estimable(&design);
+    if !not_estimable.is_empty() {
+        return Err(RsomicsError::InvalidInput(format!(
+            "Design matrix not of full rank. The following coefficients not estimable: {}",
+            not_estimable.join(" ")
+        )));
+    }
 
     let norm_factors = match norm_factors_path {
         Some(p) => load_norm_factors(p, m.n_samples)?,
@@ -658,6 +703,11 @@ pub fn glm_lrt(args: &GlmLrtArgs, output: &mut dyn Write) -> Result<u64> {
         .map(|(&l, &f)| l * f)
         .collect();
     let offset: Vec<f64> = eff_lib.iter().map(|&l| l.ln()).collect();
+    if !offset.iter().all(|o| o.is_finite()) {
+        return Err(RsomicsError::InvalidInput(
+            "offsets must be finite values (a library size is zero)".into(),
+        ));
+    }
 
     // edgeR glmFit reports coefficients (hence logFC) from a prior.count=0.125
     // augmented fit, while the deviance and LR come from the un-augmented fit.
@@ -874,5 +924,52 @@ mod tests {
             let _ = w;
         }
         assert!(adj.iter().all(|&v| (0.0..=1.0).contains(&v)));
+    }
+
+    fn design(cols: &[&str], rows: &[&[f64]]) -> Design {
+        let n_coef = cols.len();
+        let mut data = Vec::new();
+        for r in rows {
+            data.extend_from_slice(r);
+        }
+        Design {
+            data,
+            n_samples: rows.len(),
+            n_coef,
+            coef_names: cols.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn full_rank_design_estimable() {
+        let d = design(
+            &["Intercept", "groupb"],
+            &[
+                &[1.0, 0.0],
+                &[1.0, 0.0],
+                &[1.0, 0.0],
+                &[1.0, 1.0],
+                &[1.0, 1.0],
+                &[1.0, 1.0],
+            ],
+        );
+        assert!(non_estimable(&d).is_empty());
+    }
+
+    #[test]
+    fn redundant_column_flags_later_duplicate() {
+        // dup is a copy of Intercept; R's qr pivoting flags the later column.
+        let d = design(
+            &["Intercept", "groupb", "dup"],
+            &[
+                &[1.0, 0.0, 1.0],
+                &[1.0, 0.0, 1.0],
+                &[1.0, 0.0, 1.0],
+                &[1.0, 1.0, 1.0],
+                &[1.0, 1.0, 1.0],
+                &[1.0, 1.0, 1.0],
+            ],
+        );
+        assert_eq!(non_estimable(&d), vec!["dup".to_string()]);
     }
 }

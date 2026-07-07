@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-edger-glm-lrt"
-version = "0.1.0"
+version = "0.1.1"
 description = "edgeR glmFit + glmLRT — negative-binomial GLM fit and likelihood-ratio test of a coefficient or contrast (logFC, logCPM, LR, PValue, FDR)"
 edition = "2024"
 rust-version = "1.91"

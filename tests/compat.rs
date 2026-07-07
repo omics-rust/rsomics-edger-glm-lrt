@@ -87,6 +87,94 @@ fn golden_matches_committed() {
     );
 }
 
+/// The three fail-loud guards mirror edgeR 4.4.0 / limma 3.62.1 errors: a
+/// single-column design, a rank-deficient design, and a zero-library column all
+/// error in R rather than producing output, so ours must too.
+fn run_expect_error(counts: &Path, design: &Path, extra: &[&str], needle: &str) {
+    let out = Command::new(bin())
+        .arg(counts)
+        .arg("--design")
+        .arg(design)
+        .args(extra)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected failure but succeeded; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(needle),
+        "stderr missing {needle:?}:\n{stderr}"
+    );
+}
+
+const COUNTS: &str = "gene\tS1\tS2\tS3\tS4\tS5\tS6\n\
+g1\t88\t84\t86\t61\t90\t128\n\
+g2\t143\t128\t106\t118\t68\t98\n\
+g3\t57\t134\t64\t99\t61\t64\n";
+
+#[test]
+fn single_column_design_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let counts = dir.path().join("counts.tsv");
+    let design = dir.path().join("design.tsv");
+    std::fs::write(&counts, COUNTS).unwrap();
+    std::fs::write(&design, "Intercept\n1\n1\n1\n1\n1\n1\n").unwrap();
+    run_expect_error(
+        &counts,
+        &design,
+        &["--dispersion", "0.1"],
+        "at least two columns",
+    );
+}
+
+#[test]
+fn rank_deficient_design_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let counts = dir.path().join("counts.tsv");
+    let design = dir.path().join("design.tsv");
+    std::fs::write(&counts, COUNTS).unwrap();
+    std::fs::write(
+        &design,
+        "Intercept\tgroupb\tdup\n1\t0\t1\n1\t0\t1\n1\t0\t1\n1\t1\t1\n1\t1\t1\n1\t1\t1\n",
+    )
+    .unwrap();
+    run_expect_error(
+        &counts,
+        &design,
+        &["--coef", "2", "--dispersion", "0.1"],
+        "not of full rank",
+    );
+}
+
+#[test]
+fn zero_library_column_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let counts = dir.path().join("counts.tsv");
+    let design = dir.path().join("design.tsv");
+    std::fs::write(
+        &counts,
+        "gene\tS1\tS2\tS3\tS4\tS5\tS6\n\
+g1\t0\t84\t86\t61\t90\t128\n\
+g2\t0\t128\t106\t118\t68\t98\n\
+g3\t0\t134\t64\t99\t61\t64\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &design,
+        "Intercept\tgroupb\n1\t0\n1\t0\n1\t0\n1\t1\n1\t1\n1\t1\n",
+    )
+    .unwrap();
+    run_expect_error(
+        &counts,
+        &design,
+        &["--coef", "2", "--dispersion", "0.1"],
+        "offsets must be finite",
+    );
+}
+
 fn find_rscript() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("RSOMICS_RSCRIPT") {
         let p = PathBuf::from(p);
